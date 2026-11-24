@@ -711,3 +711,73 @@ class TestRealInventory:
     def test_false_positive_regression_against_the_real_inventory(self, real):
         ms = watch.build_matchers(real, {})
         assert watch.match_text(ms, TestMatching.WP_TITLE, TestMatching.WP_BODY) == []
+
+
+# --------------------------------------------------------------------------- #
+# Name-only packages (inventory gives no version)
+# --------------------------------------------------------------------------- #
+class TestNameOnlyPackages:
+    def test_entries_without_versions_normalise_to_empty_lists(self):
+        n = watch.normalize_inventory({"pypi": {"Django": {"teams": ["backend"]}, "celery": [], "x": None},
+                                       "npm": {"next": {}}})
+        assert n["pypi"] == {"Django": [], "celery": [], "x": []} and n["npm"] == {"next": []}
+        assert n["_owners"]["pypi"]["Django"] == ["backend"]
+
+    def test_osv_query_omits_version_for_name_only(self, monkeypatch):
+        sent = []
+        monkeypatch.setattr(watch, "post_json", lambda url, payload, timeout=60: (
+            sent.append(payload) or {"results": [{"vulns": [{"id": "GHSA-1"}]} for _ in payload["queries"]]}))
+        ids, hits, failed = watch.osv_query([
+            {"key": "pypi:django@*", "eco": "PyPI", "name": "django", "versions": [None]},
+            {"key": "npm:express@1", "eco": "npm", "name": "express", "versions": ["4.21.2"]}])
+        q = sent[0]["queries"]
+        assert "version" not in q[0] and q[1]["version"] == "4.21.2"
+        assert hits["GHSA-1"][0][3] is None and not failed
+
+    def test_affected_ranges_and_fixed_versions_without_a_version(self):
+        rec = {"affected": [{"package": {"name": "Django", "ecosystem": "PyPI"}, "ranges": [{"type": "ECOSYSTEM", "events": [
+            {"introduced": "4.2"}, {"fixed": "4.2.17"}, {"introduced": "5.0"}, {"fixed": "5.0.10"}]}]}]}
+        assert watch.affected_ranges(rec, "django", "PyPI") == [">=4.2 <4.2.17", ">=5.0 <5.0.10"]
+        assert watch.fixed_versions(rec, "django", "PyPI", None, limit=5) == ["4.2.17", "5.0.10"]
+        open_ended = {"affected": [{"package": {"name": "x", "ecosystem": "npm"}, "ranges": [{"type": "SEMVER", "events": [{"introduced": "0"}]}]}]}
+        assert "no fixed version" in watch.affected_ranges(open_ended, "x", "npm")[0]
+
+    def test_end_to_end_without_any_versions(self, monkeypatch, tmp_path, env):
+        # inventory with NO versions anywhere
+        with open(env["inv"], "w", encoding="utf-8") as fh:
+            yaml.safe_dump({"settings": {"timezone": "Africa/Lagos"}, "teams": {"backend": {"name": "Backend", "slack": "", "oncall": ""}},
+                            "pypi": {"Django": {"teams": ["backend"]}, "celery": {}}, "npm": {},
+                            "tools": [], "eol": [], "news_feeds": [], "news_keywords": []}, fh)
+        queried = []
+        django_rec = {"id": "GHSA-dj-0001", "aliases": ["CVE-2026-7001"], "details": "SQL injection in Django.",
+                      "database_specific": {"severity": "HIGH"},
+                      "affected": [{"package": {"name": "Django", "ecosystem": "PyPI"},
+                                    "ranges": [{"type": "ECOSYSTEM", "events": [{"introduced": "4.2"}, {"fixed": "4.2.17"}]}]}]}
+
+        def fake_query(targets):
+            queried.extend(targets)
+            ids, hits = {}, {}
+            for t in targets:
+                found = {"GHSA-old-0000"} | ({"GHSA-dj-0001"} if env["ids"] and t["name"] == "django" else set())
+                ids[t["key"]] = found
+                for v in found:
+                    hits.setdefault(v, []).append((t["key"], t["name"], "PyPI", t["versions"][0]))
+            return ids, hits, set()
+        monkeypatch.setattr(watch, "osv_query", fake_query)
+        monkeypatch.setattr(watch, "osv_detail", lambda vid: django_rec if vid == "GHSA-dj-0001" else {"id": vid})
+
+        env["ids"] = set()
+        assert run_main(env) == 0                                   # baseline: existing advisories recorded silently
+        assert all(t["versions"] == [None] for t in queried) and {t["key"] for t in queried} == {"pypi:Django@*", "pypi:celery@*"}
+        assert "baseline complete" in env["posted"][0]
+        env["posted"].clear()
+
+        env["ids"] = {"new"}                                        # a new Django advisory appears
+        assert run_main(env) == 0
+        report = "\n".join(env["posted"])
+        assert "GHSA-old-0000" not in report and "CVE-2026-7001" in report
+        assert "django (version not specified in the inventory). Advisory affects: &gt;=4.2 &lt;4.2.17" in report   # Slack-escaped <, >
+        assert "Unverified match in the inventory." in report and "Confirmed match" not in report
+        assert "None" not in report and "• Affected team/s: Backend" in report
+        assert "4.2.17" in report                                   # fixed version offered
+        assert "CVE-2026-7001" in read_json(env["state"])["alert_history"]
