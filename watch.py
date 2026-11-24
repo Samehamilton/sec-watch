@@ -421,14 +421,22 @@ def fetch_registry(name):
 # --------------------------------------------------------------------------- #
 # OSV
 # --------------------------------------------------------------------------- #
+def _osv_q(name, eco, ver=None, token=None):
+    q = {"package": {"name": name, "ecosystem": eco}}
+    if ver:                       # no version = every advisory ever published for the package
+        q["version"] = ver
+    if token:
+        q["page_token"] = token
+    return q
+
+
 def osv_query(targets):
     """targets: dicts with key, eco, name, versions. Returns (ids_by_key, hits, failed_keys)."""
     jobs = [(t["key"], t["name"], t["eco"], v) for t in targets for v in t["versions"]]
     ids_by_key, hits, failed = {}, {}, set()
     for chunk in chunks(jobs, 300):
         try:
-            resp = post_json(OSV_BATCH, {"queries": [
-                {"package": {"name": n, "ecosystem": e}, "version": v} for _, n, e, v in chunk]})
+            resp = post_json(OSV_BATCH, {"queries": [_osv_q(n, e, v) for _, n, e, v in chunk]})
             results = resp.get("results", [])
             if len(results) != len(chunk):
                 raise ValueError("unexpected OSV result count")
@@ -441,8 +449,7 @@ def osv_query(targets):
             token, guard = r.get("next_page_token"), 0
             while token and guard < 20:
                 try:
-                    more = post_json(OSV_BATCH, {"queries": [
-                        {"package": {"name": n, "ecosystem": e}, "version": v, "page_token": token}]})["results"][0]
+                    more = post_json(OSV_BATCH, {"queries": [_osv_q(n, e, v, token)]})["results"][0]
                 except Exception as ex:
                     log(f"OSV page failed: {ex}")
                     failed.add(key)
@@ -495,7 +502,7 @@ def vt(s):
     return p[0] if p else None
 
 
-def fixed_versions(vuln, name, eco, ver):
+def fixed_versions(vuln, name, eco, ver, limit=3):
     out = []
     for a in vuln.get("affected", []) or []:
         p = a.get("package", {}) or {}
@@ -505,14 +512,37 @@ def fixed_versions(vuln, name, eco, ver):
             for ev in r.get("events", []) or []:
                 if "fixed" in ev:
                     out.append(ev["fixed"])
-    cur = vt(ver)
+    cur = vt(ver) if ver else None
     out = [f for f in out if not (cur and vt(f) and vt(f) <= cur)]      # only fixes newer than yours
-    same = [f for f in out if f.split(".")[0] == ver.split(".")[0]]
+    same = [f for f in out if ver and f.split(".")[0] == ver.split(".")[0]]
     res = same or out
 
     def k(s):
         return [int(x) if x.isdigit() else 0 for x in re.split(r"[.\-]", s)]
-    return sorted(set(res), key=k)[:3]
+    return sorted(set(res), key=k)[:limit]
+
+
+def affected_ranges(vuln, name, eco, limit=4):
+    """Human-readable affected ranges for a package, e.g. ['>=4.2 <4.2.17']. Used when the inventory has no version."""
+    out = []
+    for a in vuln.get("affected", []) or []:
+        p = a.get("package") or {}
+        if str(p.get("name", "")).lower() != name.lower() or p.get("ecosystem") != eco:
+            continue
+        for r in a.get("ranges") or []:
+            if r.get("type") not in ("SEMVER", "ECOSYSTEM"):
+                continue
+            lo = None
+            for e in r.get("events") or []:
+                if "introduced" in e:
+                    lo = e["introduced"]
+                elif "fixed" in e or "last_affected" in e:
+                    op, hi = ("<", e["fixed"]) if "fixed" in e else ("<=", e["last_affected"])
+                    out.append((f">={lo} " if lo and lo != "0" else "") + f"{op}{hi}")
+                    lo = None
+            if lo is not None:
+                out.append(f">={lo}, no fixed version listed" if lo != "0" else "all versions, no fixed version listed")
+    return list(dict.fromkeys(out))[:limit]
 
 
 def advisory_url(vuln):
@@ -1420,6 +1450,9 @@ def main(argv=None):
     targets, unresolved, versions_by_pkg, deprecated = [], [], {}, {}
     for name, specs in (inv.get("npm") or {}).items():
         reg = registry.get(name)
+        if not specs:                                   # no version given: watch every advisory for the name
+            targets.append({"key": f"npm:{name}@*", "eco": "npm", "name": name, "spec": "*", "versions": [None]})
+            continue
         for spec in specs:
             res = resolve_spec(spec, reg)
             if res is None or res[0] is None:
@@ -1436,6 +1469,9 @@ def main(argv=None):
                 if msg:
                     deprecated[name] = short_text(str(msg), 140)
     for name, specs in (inv.get("pypi") or {}).items():
+        if not specs:
+            targets.append({"key": f"pypi:{name}@*", "eco": "PyPI", "name": name.lower(), "spec": "*", "versions": [None]})
+            continue
         for spec in specs:
             targets.append({"key": f"pypi:{name}@{spec}", "eco": "PyPI", "name": name.lower(),
                             "spec": str(spec), "versions": [str(spec)]})
@@ -1505,19 +1541,27 @@ def main(argv=None):
             n = nvd_cve(cve)
             if n:
                 sev, score = n["severity"] if n["severity"] in SEV_ORDER else None, n["score"]
-        grouped, fixed = {}, []
-        for key, name, eco, ver in sorted(set(tlist)):
+        grouped, fixed, ranges = {}, [], []
+        for key, name, eco, ver in sorted(set(tlist), key=lambda h: (h[0], str(h[3]))):
             grouped.setdefault((name, ver), []).append(spec_of.get(key, "?"))
-            fixed += fixed_versions(v, name, eco, ver)
-        techs = [f"{n} {ver} (inventory {', '.join(sorted(set(sp)))})" for (n, ver), sp in sorted(grouped.items())]
+            fixed += fixed_versions(v, name, eco, ver, limit=3 if ver else 5)
+            if ver is None:
+                ranges += affected_ranges(v, name, eco)
+        techs = [f"{n} {ver} (inventory {', '.join(sorted(set(sp)))})" if ver else f"{n} (version not specified in the inventory)"
+                 for (n, ver), sp in sorted(grouped.items(), key=lambda kv: (kv[0][0], str(kv[0][1])))]
         shown = ", ".join(techs[:3]) + (f" +{len(techs) - 3} more" if len(techs) > 3 else "")
-        if any(sp != ver for (_n, ver), specs_ in grouped.items() for sp in specs_):
+        if any(ver and sp != ver for (_n, ver), specs_ in grouped.items() for sp in specs_):
             shown += ". Matched against the newest release in the declared range; the deployed version is not verified"
+        name_only = any(ver is None for (_n, ver) in grouped)
+        if name_only:
+            shown += (". Advisory affects: " + "; ".join(dict.fromkeys(ranges)) if ranges
+                      else ". The advisory data does not list affected versions") + ". Compare with the version you run"
         findings.append(finding(
             kind="pkg", id=vid, cve=cve, sev=sev, score=score, mal=mal,
             kev=bool(cve and cve in kev), impact=short_text(v.get("details") or v.get("summary") or ""),
-            tech=shown, match="confirmed", teams=resolve_teams(inv, pkg_owner_keys(tlist)),
-            fixed=list(dict.fromkeys(fixed))[:3], sources=f"<{advisory_url(v)}>",
+            tech=shown, match="unverified" if name_only else "confirmed",
+            teams=resolve_teams(inv, pkg_owner_keys(tlist)),
+            fixed=list(dict.fromkeys(fixed))[:5 if name_only else 3], sources=f"<{advisory_url(v)}>",
             deprecated=any(h[1] in deprecated for h in tlist)))
         if cve:
             run_cves.add(cve)
@@ -1536,11 +1580,11 @@ def main(argv=None):
         if not match:
             continue
         hit_list = [h for i in match for h in hits.get(i, [])]
-        who = sorted({f"{h[1]} {h[3]}" for h in hit_list})[:3]
+        who = sorted({f"{h[1]} {h[3]}" if h[3] else f"{h[1]} (version not specified in the inventory)" for h in hit_list})[:3]
         findings.append(finding(
             kind="pkg", id=cve_id, cve=cve_id, sev="CRITICAL", kev=True,
             impact="Newly added to CISA's exploited list. " + short_text(entry.get("shortDescription", "")),
-            tech=", ".join(who), match="confirmed", teams=resolve_teams(inv, pkg_owner_keys(hit_list)),
+            tech=", ".join(who), match="unverified" if any(h[3] is None for h in hit_list) else "confirmed", teams=resolve_teams(inv, pkg_owner_keys(hit_list)),
             sources=f"<https://nvd.nist.gov/vuln/detail/{cve_id}>"))
         run_cves.add(cve_id)
 
