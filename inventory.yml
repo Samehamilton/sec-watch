@@ -1,21 +1,130 @@
-Python, 
-Django, 
-Django REST
-Celery 
-React(Nextjs) 
-React Native 
-PostgreSQL 17 
-PgBouncer 
-Redis 
-Nginx 
-Docker 
-Coolify 
-Cloudflare 
-Apache Superset 
-Dojah 
-Smile ID 
-Tatum 
-ChainUp 
-Resend 
-Microsoft Clarity 
-External liquidity partners
+# ---------------------------------------------------------------------------
+# security-watch inventory (new project)
+# Built from your list. No versions or owners were provided, so none were invented.
+# Everything is watched by name; add `teams: [key]` to entries once you have a team registry.
+# ---------------------------------------------------------------------------
+settings:
+  timezone: Africa/Lagos
+  version_strategy: newest
+  max_detailed_items: 40
+  news_max_age_hours: 24
+  news_cve_max_age_days: 45
+  tool_cve_max_age_days: 45
+  eol_warn_days: 90
+
+# TEAM REGISTRY: replace with your real teams, then add `teams: [key]` to entries below.
+# Entries with no teams are reported as "Unmapped" (never guessed).
+teams:
+  # backend:  {name: "Backend",  slack: "#team-backend",  oncall: ""}
+  # frontend: {name: "Frontend", slack: "#team-frontend", oncall: ""}
+  # mobile:   {name: "Mobile",   slack: "#team-mobile",   oncall: ""}
+  # devops:   {name: "DevOps",   slack: "#team-devops",   oncall: ""}
+  # data:     {name: "Data",     slack: "#team-data",     oncall: ""}
+
+news_feeds: []
+
+news_keywords:
+  - "Django"
+  - "Celery"
+  - "Next.js"
+  - "React Native"
+  - "PostgreSQL"
+  - "PgBouncer"
+  - "Redis"
+  - "Nginx"
+  - "Docker"
+  - "Coolify"
+  - "Cloudflare"
+  - "Apache Superset"
+
+aliases:
+  django: ["Django"]
+  djangorestframework: ["Django REST framework", "DRF"]
+  celery: ["Celery"]
+  next: ["Next.js"]
+  react-native: ["React Native"]
+  apache-superset: ["Apache Superset"]
+
+# Installed software, matched by name against CISA KEV and NVD.
+# The cpe values are my best match to NVD naming: please spot-check them on nvd.nist.gov.
+tools:
+  - name: PostgreSQL
+    version: "17"                 # from your list
+    teams: []
+    cpe: ["postgresql:postgresql"]
+    kev_keywords: ["postgresql"]
+    news_keywords: ["PostgreSQL"]
+  - name: PgBouncer
+    version: null
+    teams: []
+    cpe: ["pgbouncer:pgbouncer"]
+    kev_keywords: ["pgbouncer"]
+    news_keywords: ["PgBouncer"]
+  - name: Redis
+    version: null
+    teams: []
+    cpe: ["redis:redis"]
+    kev_keywords: ["redis"]
+    news_keywords: ["Redis"]
+  - name: Nginx
+    version: null
+    teams: []
+    cpe: ["f5:nginx"]
+    kev_keywords: ["nginx"]
+    news_keywords: ["Nginx"]
+  - name: Docker
+    version: null
+    teams: []
+    cpe: ["docker:docker_desktop", "mobyproject:moby"]
+    kev_keywords: ["docker", "moby"]
+    news_keywords: ["Docker"]
+  - name: Coolify
+    version: null                 # no CPE set: matched on news/KEV keywords only
+    teams: []
+    kev_keywords: ["coolify"]
+    news_keywords: ["Coolify"]
+  - name: Python
+    version: null
+    teams: []
+    cpe: ["python:python"]
+    kev_keywords: []
+  - name: Apache Superset
+    version: null                 # also watched as the apache-superset PyPI package below
+    teams: []
+    cpe: ["apache:superset"]
+    kev_keywords: ["superset"]
+    news_keywords: ["Apache Superset"]
+
+# End-of-life tracking (endoflife.date). Add more once you know your versions, e.g.
+#   - {product: python, label: "Python", cycles: ["3.12"], teams: []}
+eol:
+  - {product: postgresql, label: "PostgreSQL", cycles: ["17"], teams: []}
+
+# --- PACKAGE SCAN (no versions needed) ----------------------------------------------------
+# A package listed WITHOUT a version is watched by name: you are alerted whenever a NEW advisory is
+# published for it, and each alert lists which versions are affected so the team can compare.
+# The first run records all existing advisories silently. These alerts are always "Unverified".
+pypi:
+  Django: {teams: []}
+  djangorestframework: {teams: []}
+  celery: {teams: []}
+  apache-superset: {teams: []}
+npm:
+  next: {teams: []}
+  react: {teams: []}
+  react-native: {teams: []}
+
+unversioned: []
+
+# Vendor services: no public CVEs to match, so they cannot be scanned. Listed for ownership/context only.
+services:
+  - {name: Cloudflare, teams: []}
+  - {name: Dojah, teams: []}
+  - {name: Smile ID, teams: []}
+  - {name: Tatum, teams: []}
+  - {name: ChainUp, teams: []}
+  - {name: Resend, teams: []}
+  - {name: Microsoft Clarity, teams: []}
+  - {name: External liquidity partners, teams: []}
+
+skip: []
